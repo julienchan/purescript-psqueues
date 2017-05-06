@@ -1,0 +1,15 @@
+{
+  "name": "purescript-queues",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "output"
+  ],
+  "dependencies": {
+    "purescript-lists": "^4.0.0"
+  },
+  "devDependencies": {
+    "purescript-quickcheck": "^4.0.0"
+  }
+}
