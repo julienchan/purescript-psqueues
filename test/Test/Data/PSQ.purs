@@ -12,7 +12,7 @@ import Control.Monad.Eff.Random (RANDOM)
 import Data.Array as A
 import Data.Foldable (foldr, all)
 import Data.List (List(Nil), (:), (!!), uncons, reverse, length)
-import Data.Tuple (Tuple(Tuple))
+import Data.Tuple (Tuple(Tuple), fst)
 import Data.Maybe (Maybe(..), fromJust, isNothing)
 import Data.NonEmpty ((:|))
 import Data.Unfoldable (replicateA)
@@ -161,6 +161,13 @@ propertyIf true p  = test p
 elemEq :: forall k p v. Eq k => Eq p => Eq v => PSQ.ElemRec k p v -> PSQ.ElemRec k p v -> Boolean
 elemEq x y = x.key == y.key && x.prio == y.prio && x.value == y.value
 
+showElem :: forall k p v. Show k => Show p => Show v => PSQ.ElemRec k p v -> String
+showElem rec =
+  "{ key: " <> show rec.key
+  <> ", prio: " <> show rec.prio
+  <> ", value: " <> show rec.value
+  <> " }"
+
 infix 2 propertyIf as ==>
 
 psqTest :: forall eff. Eff (console :: CONSOLE, random :: RANDOM, exception :: EXCEPTION | eff) Unit
@@ -226,7 +233,7 @@ psqTest = do
 
   log "Test atMost - ascending keys"
   quickCheck $ \(TestPSQ t) ->
-    let elList        = PSQ.atMost 6 t
+    let elList        = fst $ PSQ.atMost 6 t
         testAsc xs =
           let x = unsafePartial $ fromJust $ xs !! 0
               y = unsafePartial $ fromJust $ xs !! 1
@@ -238,7 +245,7 @@ psqTest = do
 
   log "Test atMost - priority"
   quickCheck $ \(TestPSQ t) ->
-    let el = PSQ.atMost 5 t :: List (PSQ.ElemRec Int Int Char)
+    let el = fst (PSQ.atMost 5 t) :: List (PSQ.ElemRec Int Int Char)
     in all ((>=) 5 <<< _.prio) el
 
   log "Test empty"
