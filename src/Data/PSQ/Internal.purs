@@ -1,6 +1,7 @@
-module Data.OrdPSQ.Internal
+module Data.PSQ.Internal
   ( Elem(..)
-  , OrdPSQ(..)
+  , ElemRec
+  , PSQ(..)
   , LTree(..)
   , Size
   -- query
@@ -9,14 +10,17 @@ module Data.OrdPSQ.Internal
   , member
   , lookup
   , findMin
+  , atMost
   -- construction
   , empty
   , singleton
+  , elemRec
   -- Insertion
   , insert
    -- Delete/Update
   , delete
   , deleteMin
+  , adjust
   , alter
   , alterMin
   -- Convertion
@@ -27,10 +31,13 @@ module Data.OrdPSQ.Internal
   , insertView
   , deleteView
   , minView
+  -- Traversals
+  , mapWithKeyPrio
   -- * Tournament view
   , TourView(..)
   , tourView
   , play
+  , unsafePlay
   -- Balancing internals
   , left
   , right
@@ -46,39 +53,77 @@ module Data.OrdPSQ.Internal
 
 import Prelude hiding (Void)
 
-import Data.Foldable (class Foldable, foldr)
+import Data.Foldable (class Foldable, foldr, foldl, foldMap)
 import Data.List (List(Nil), (:))
 import Data.Maybe (Maybe(..), isJust)
-import Data.Tuple (Tuple(..), fst)
-import Data.Tuple.Nested ((/\), tuple3, tuple4, Tuple3, Tuple4)
+import Data.Tuple (Tuple(..))
+import Data.Traversable (class Traversable, traverse)
 import Partial.Unsafe (unsafePartial)
 
--- | `Elem k p v ` respresent an element on Queue. It's mean key `k` with value `v`
--- | and priority `p`.
+-- | An element with key `k`, value `v` and priority `p`.
 data Elem k p v = Elem k p v
+
+type ElemRec k p v =
+  { key   :: k
+  , prio  :: p
+  , value :: v
+  }
 
 instance functorElem :: Functor (Elem k p) where
   map f (Elem k p v) = Elem k p (f v)
 
 -- | A mapping from keys `k` to priorites `p` and values `v`.
-data OrdPSQ k p v
+data PSQ k p v
   = Void
   | Winner (Elem k p v) (LTree k p v) k
 
-instance functorOrdPSQ :: Functor (OrdPSQ k p) where
+instance functorPSQ :: Functor (PSQ k p) where
   map _ Void = Void
   map f (Winner el lt k) = Winner (f <$> el) (f <$> lt) k
 
-instance eqOrdPSQ :: (Ord k, Ord p, Eq v) => Eq (OrdPSQ k p v) where
+instance foldablePSQ :: Foldable (PSQ k p) where
+  foldl   f z q = foldl f z (_.value <$> toAscList q)
+  foldr   f z q = foldr f z (_.value <$> toAscList q)
+  foldMap f   q = foldMap f (_.value <$> toAscList q)
+
+instance traversablePSQ :: Traversable (PSQ k p) where
+  traverse _ Void             = pure Void
+  traverse f (Winner el lt m) = Winner
+    <$> goElem el
+    <*> goTree lt
+    <*> pure m
+    where
+      goElem (Elem k p v) = Elem k p <$> f v
+
+      goTree Start = pure Start
+      goTree (LLoser s el' lt' m' rt') = LLoser s
+        <$> goElem el'
+        <*> goTree lt'
+        <*> pure m'
+        <*> goTree rt'
+      goTree (RLoser s el' lt' m' rt') = RLoser s
+        <$> goElem el'
+        <*> goTree lt'
+        <*> pure m'
+        <*> goTree rt'
+  sequence = traverse id
+
+instance eqPSQ :: (Ord k, Ord p, Eq v) => Eq (PSQ k p v) where
   eq x y = case minView x, minView y of
-    Nothing, Nothing -> true
-    Just (xk /\ xp /\ xv /\ x' /\ _), Just (yk /\ yp /\ yv /\ y' /\ _) ->
-      xk == yk && xp == yp && xv == yv && x' == y'
+    Nothing, Nothing     -> true
+    Just xx, Just yy ->
+      xx.key == yy.key && xx.value == yy.value && xx.prio == yy.prio && xx.queue == yy.queue
     Just _, Nothing -> false
     Nothing, Just _ -> false
 
-instance showOrdPSQ :: (Show k, Show p, Show v) => Show (OrdPSQ p k v) where
-  show t = "(OrdPSQ " <> show (toAscList t) <> " )"
+instance showPSQ :: (Show k, Show p, Show v) => Show (PSQ p k v) where
+  show t = "(PSQ " <> show (showElem <$> toAscList t) <> " )"
+    where
+      showElem rec =
+        "{ key: " <> show rec.key
+        <> ", prio: " <> show rec.prio
+        <> ", value: " <> show rec.value
+        <> " }"
 
 type Size = Int
 
@@ -92,25 +137,29 @@ instance functorLtree :: Functor (LTree k p) where
   map f (LLoser s el lt k rt) = LLoser s (f <$> el) (f <$> lt) k (f <$> rt)
   map f (RLoser s el lt k rt) = RLoser s (f <$> el) (f <$> lt) k (f <$> rt)
 
+infixr 6 Tuple as /\
+
 -- | Test if Queue is empty
-null :: forall k p v. OrdPSQ k p v -> Boolean
+null :: forall k p v. PSQ k p v -> Boolean
 null Void = true
 null _    = false
 
 -- | The number of elements in a queue.
-size :: forall k p v. OrdPSQ k p v -> Int
+size :: forall k p v. PSQ k p v -> Int
 size Void            = 0
 size (Winner _ lt _) = 1 + size' lt
 
 -- | Test if a key is a member of a queue
-member :: forall k p v. Ord k => k -> OrdPSQ k p v -> Boolean
+-- |
+-- | Running time: `O(log n)`
+member :: forall k p v. Ord k => k -> PSQ k p v -> Boolean
 member k = isJust <<< lookup k
 
 -- | Get the priority and value of a given key, otherwise Nothing
 -- | if is not bound.
 -- |
 -- | Running time: `O(log n)`
-lookup :: forall k p v. Ord k => k -> OrdPSQ k p v -> Maybe (Tuple p v)
+lookup :: forall k p v. Ord k => k -> PSQ k p v -> Maybe (Tuple p v)
 lookup k = go
   where
     go t = case tourView t of
@@ -123,26 +172,50 @@ lookup k = go
 -- | Get the element with the lowest priority
 -- |
 -- | Running time: `O(1)`
-findMin :: forall k p v. OrdPSQ k p v -> Maybe (Tuple3 k p v)
+findMin :: forall k p v. PSQ k p v -> Maybe (ElemRec k p v)
 findMin Void                      = Nothing
-findMin (Winner (Elem k p v) _ _) = Just $ tuple3 k p v
+findMin (Winner (Elem k p v) _ _) = Just { key: k, prio: p, value: v }
+
+-- | Get all elements in queue with priority less than the provided priority,
+-- | in order of ascending keys.
+-- |
+-- | Running time: `O(r*(log n - log r))`
+atMost
+  :: forall k p v
+   . Ord k => Ord p
+  => p -> PSQ k p v -> List (ElemRec k p v)
+atMost _ Void = Nil
+atMost pt (Winner elem lt _) = prune elem lt
+  where
+    prune e@(Elem _ p _) t
+     | p > pt    = Nil
+     | otherwise = walkTree e t
+
+    walkTree (Elem k p v) Start        = { key: k, prio: p, value: v } : Nil
+    walkTree el' (LLoser _ el tl _ tr) = prune el tl <> walkTree el' tr
+    walkTree el' (RLoser _ el tl _ tr) = walkTree el' tl <> prune el tl
 
 -- | Construct an empty queue
-empty :: forall k p v. OrdPSQ k p v
+empty :: forall k p v. PSQ k p v
 empty = Void
 
 -- | Create a queue with a single element.
 -- |
 -- | Running time: `O(1)``
-singleton :: forall k p v. k -> p -> v -> OrdPSQ k p v
+singleton :: forall k p v. k -> p -> v -> PSQ k p v
 singleton k p v = Winner (Elem k p v) Start k
+
+-- | Create an element record, useful when building PSQ from `Foldable`
+-- |
+elemRec :: forall k p v. k -> p -> v -> ElemRec k p v
+elemRec = { key: _, prio: _, value: _ }
 
 -- | Insert a new key, priority and value into the queue. If the key is
 -- | already present in the queue, the associated priority and value are replaced
 -- | with the supplied priority and value.
 -- |
 -- | Running time: `O(log n)`
-insert :: forall k p v. Ord k => Ord p => k -> p -> v -> OrdPSQ k p v -> OrdPSQ k p v
+insert :: forall k p v. Ord k => Ord p => k -> p -> v -> PSQ k p v -> PSQ k p v
 insert k p v = go
   where
     go t = case t of
@@ -162,7 +235,7 @@ insert k p v = go
 -- | key is not a member of the queue, the original queue is returned.
 -- |
 -- | Running time: `O(log n)`
-delete :: forall k p v. Ord k => Ord p => k -> OrdPSQ k p v -> OrdPSQ k p v
+delete :: forall k p v. Ord k => Ord p => k -> PSQ k p v -> PSQ k p v
 delete k = go
   where
     go t = case t of
@@ -177,113 +250,213 @@ delete k = go
         | k <= m    -> go (Winner e' tl m) `play` (Winner e tr m')
         | otherwise -> (Winner e' tl m) `play` go (Winner e tr m')
 
-deleteMin :: forall k p v. Ord k => Ord p => OrdPSQ k p v -> OrdPSQ k p v
-deleteMin t = case minView t of
-  Nothing                       -> t
-  Just (_ /\ _ /\ _ /\ t' /\ _) -> t'
+-- | Update a priority at a specific key with the result of the provided function.
+-- | When the key is not a member of the queue, the original queue is returned.
+-- |
+-- | Running time: `O(log n)`
+adjust :: forall k p v. Ord k => Ord p => (p -> p) -> k -> PSQ k p v -> PSQ k p v
+adjust f k = go
+  where
+    go t = case t of
+      Void -> empty
+      Winner (Elem k' p v) Start _
+        | k == k'   -> singleton k' (f p) v
+        | otherwise -> singleton k' p v
+      Winner e (RLoser _ e' tl m tr) m'
+        | k <= m    -> go (Winner e tl m) `unsafePlay` (Winner e' tr m')
+        | otherwise -> (Winner e tl m) `unsafePlay` go (Winner e' tr m')
+      Winner e (LLoser _ e' tl m tr) m'
+        | k <= m    -> go (Winner e' tl m) `unsafePlay` (Winner e tr m')
+        | otherwise -> (Winner e' tl m) `unsafePlay` go (Winner e tr m')
 
+-- | Delete an item with the least priority, and return the rest of the queue.
+-- | In case the queue is empty, the original queue returned
+-- |
+-- | Running time: `O(log n)`
+deleteMin :: forall k p v. Ord k => Ord p => PSQ k p v -> PSQ k p v
+deleteMin t = case minView t of
+  Nothing        -> t
+  Just { queue } -> queue
+
+-- | This function can be used to update, delete, and insert a value and its priority
+-- | for the given key.
+-- |
+-- | Running time: `O(log n)`
 alter
   :: forall b k p v
    . Ord k => Ord p
   => (Maybe (Tuple p v) -> Tuple b (Maybe (Tuple p v)))
   -> k
-  -> OrdPSQ k p v
-  -> Tuple b (OrdPSQ k p v)
+  -> PSQ k p v
+  -> Tuple b (PSQ k p v)
 alter f k psq0 =
   let psq1 /\ mbPV = case deleteView k psq0 of
-                          Nothing                   -> psq0 /\ Nothing
-                          Just (p /\ v /\ psq /\ _) -> psq /\ Just (p /\ v)
+                          Nothing  -> psq0 /\ Nothing
+                          Just rec -> rec.queue /\ Just (rec.prio /\ rec.value)
       b /\ mbPV'   = f mbPV
   in case mbPV' of
     Nothing          -> b /\ psq1
     Just (p /\ v)    -> b /\ (insert k p v psq1)
 
+-- | A variant of 'alter' which works on the element with the minimum priority
+-- | Unlike 'alter', this variant also allows you to change the key of element.
+-- |
+-- | Running time: `O(log n)`
 alterMin
   :: forall b k p v
    . Ord k => Ord p
-  => (Maybe (Tuple3 k p v) -> Tuple b (Maybe (Tuple3 k p v)))
-  -> OrdPSQ k p v
-  -> Tuple b (OrdPSQ k p v)
+  => (Maybe (ElemRec k p v) -> Tuple b (Maybe (ElemRec k p v)))
+  -> PSQ k p v
+  -> Tuple b (PSQ k p v)
 alterMin f psq0 = case minView psq0 of
   Nothing ->
     let b /\ mbKPV = f Nothing
     in b /\ insertMay mbKPV psq0
-  Just (k /\ p /\ v /\ psq1 /\ _) ->
-    let b /\ mbKPV = f $ Just (tuple3 k p v)
-    in b /\ insertMay mbKPV psq1
+  Just rec ->
+    let b /\ mbKPV = f $ Just { key: rec.key, prio: rec.prio, value: rec.value }
+    in b /\ insertMay mbKPV rec.queue
   where
-    insertMay Nothing                   psq = psq
-    insertMay (Just (k /\ p /\ v /\ _)) psq = insert k p v psq
+    insertMay Nothing    psq = psq
+    insertMay (Just rec) psq = insert rec.key rec.prio rec.value psq
 
+-- | Build a priority search queue from a `Foldable` of { key, value, prio } records.
+-- | If the Foldable contains more than one priority and value for the same key, the
+-- | last priority and value for the key is retained.
+-- |
+-- | Running time: O(n*log n)
 fromFoldable
   :: forall f k p v
    . Foldable f => Ord k => Ord p
-  => f (Tuple3 k p v)
-  -> OrdPSQ k p v
+  => f (ElemRec k p v)
+  -> PSQ k p v
 fromFoldable = foldr accum empty
   where
-    accum (k /\ p /\ v /\ _) q = insert k p v q
+    accum rec q = insert rec.key rec.prio rec.value q
 
-keys :: forall k p v. OrdPSQ k p v -> List k
-keys = map fst <<< toAscList
+-- | Obtain the list of present keys in the queue.
+-- |
+-- | Running time: `O(n)`
+keys :: forall k p v. PSQ k p v -> List k
+keys = map _.key <<< toAscList
 
-toAscList :: forall k p v. OrdPSQ k p v -> List (Tuple3 k p v)
+-- | Convert a queue to a list of { key, value, prio } records. The order of list
+-- | is ascending.
+-- |
+-- | Running time: `O(n)`
+toAscList :: forall k p v. PSQ k p v -> List (ElemRec k p v)
 toAscList q = go q
   where
   go t = case tourView t of
     Null                -> Nil
-    Single (Elem k p v) -> (tuple3 k p v : Nil)
+    Single (Elem k p v) -> { key: k, prio: p, value: v } : Nil
     Play tl tr          -> go tl <> go tr
 
+-- | Insert a new key, priority and value into the queue. If the key is already
+-- | present in the queue, then the evicted priority and value can be found the
+-- | first element of the returned tuple.
+-- |
+-- | Running time: `O(log n)`
 insertView
   :: forall k p v
    . Ord k => Ord p
-  => k -> p -> v -> OrdPSQ k p v -> Tuple (Maybe (Tuple p v)) (OrdPSQ k p v)
+  => k -> p -> v -> PSQ k p v -> Tuple (Maybe (Tuple p v)) (PSQ k p v)
 insertView k p x t = case deleteView k t of
-  Nothing                   -> Nothing /\ insert k p x t
-  Just (p' /\ x' /\ _ /\ _) -> Just (p' /\ x') /\ insert k p x t
+  Nothing              -> Nothing /\ insert k p x t
+  Just { prio, value } -> Just (prio /\ value) /\ insert k p x t
 
+-- | Delete a key and its priority and value from the queue. If the key was present,
+-- | the associated priority and value are returned in addition to the updated queue.
+-- |
+-- | Running time: `O(log n)`
 deleteView
   :: forall k p v
-   . Ord k => Ord p => k -> OrdPSQ k p v -> Maybe (Tuple3 p v (OrdPSQ k p v))
+   . Ord k => Ord p => k -> PSQ k p v -> Maybe { prio :: p, value :: v, queue :: PSQ k p v }
 deleteView k psq = case psq of
   Void            -> Nothing
   Winner (Elem k' p v) Start _
-      | k == k'   -> Just $ tuple3 p v empty
+      | k == k'   -> Just $ { prio: p, value: v, queue: empty }
       | otherwise -> Nothing
   Winner e (RLoser _ e' tl m tr) m'
-      | k <= m    -> map (\(p /\ v /\ q /\ _) -> tuple3 p v $ q `play` (Winner e' tr m')) (deleteView k (Winner e tl m))
-      | otherwise -> map (\(p /\ v /\ q /\ _) -> tuple3 p v $ (Winner e tl m) `play` q ) (deleteView k (Winner e' tr m'))
+      | k <= m    ->
+          map
+            (\rec -> { prio: rec.prio, value: rec.value, queue: rec.queue `play` (Winner e' tr m')})
+            (deleteView k (Winner e tl m))
+      | otherwise ->
+          map
+            (\rec -> { prio: rec.prio, value: rec.value, queue: (Winner e tl m) `play` rec.queue })
+            (deleteView k (Winner e' tr m'))
   Winner e (LLoser _ e' tl m tr) m'
-      | k <= m    -> map (\(p /\ v /\ q /\ _) -> tuple3 p v $ q `play` (Winner e tr m')) (deleteView k (Winner e' tl m))
-      | otherwise -> map (\(p /\ v /\ q /\ _) -> tuple3 p v $ (Winner e' tl m) `play` q) (deleteView k (Winner e tr m'))
+      | k <= m    ->
+          map
+            (\rec -> { prio: rec.prio, value: rec.value, queue: rec.queue `play` (Winner e tr m') })
+            (deleteView k (Winner e' tl m))
+      | otherwise ->
+          map
+            (\rec -> { prio: rec.prio, value: rec.value, queue: (Winner e' tl m) `play` rec.queue })
+            (deleteView k (Winner e tr m'))
 
-minView :: forall k p v. Ord k => Ord p => OrdPSQ k p v -> Maybe (Tuple4 k p v (OrdPSQ k p v))
+-- | Retrieve an element with the least priority, and the rest of the queue stripped of that binding.
+-- |
+-- | Running time: `O(log n)`
+minView
+  :: forall k p v
+   . Ord k => Ord p
+  => PSQ k p v -> Maybe { key :: k, prio :: p, value :: v, queue :: PSQ k p v}
 minView Void                      = Nothing
-minView (Winner (Elem k p v) t m) = Just $ tuple4 k p v (secondBest t m)
+minView (Winner (Elem k p v) t m) = Just $ { key: k, prio: p, value: v, queue: secondBest t m }
 
-secondBest :: forall k p v. Ord k => Ord p => LTree k p v -> k -> OrdPSQ k p v
+secondBest :: forall k p v. Ord k => Ord p => LTree k p v -> k -> PSQ k p v
 secondBest Start _                 = Void
 secondBest (LLoser _ e tl m tr) m' = Winner e tl m `play` secondBest tr m'
 secondBest (RLoser _ e tl m tr) m' = secondBest tl m `play` Winner e tr m'
 
+-- | Map every value on queue, the function passed here will receive all component
+-- | of element -- key, prio, value -- and returned value will be used to update the current value.
+-- |
+-- | Running time: `O(n)`
+mapWithKeyPrio :: forall k p v w. (k -> p -> v -> w) -> PSQ k p v -> PSQ k p w
+mapWithKeyPrio f = goPSQ
+  where
+    goPSQ :: PSQ k p v -> PSQ k p w
+    goPSQ Void           = Void
+    goPSQ (Winner e l k) = Winner (goElem e) (goLTree l) k
+
+    goElem :: Elem k p v -> Elem k p w
+    goElem (Elem k p x) = Elem k p (f k p x)
+
+    goLTree :: LTree k p v -> LTree k p w
+    goLTree Start              = Start
+    goLTree (LLoser s e l k r) = LLoser s (goElem e) (goLTree l) k (goLTree r)
+    goLTree (RLoser s e l k r) = RLoser s (goElem e) (goLTree l) k (goLTree r)
+
+-- | Tournament trees
 data TourView k p v
   = Null
   | Single (Elem k p v)
-  | Play (OrdPSQ k p v) (OrdPSQ k p v)
+  | Play (PSQ k p v) (PSQ k p v)
 
-tourView :: forall k p v. OrdPSQ k p v -> TourView k p v
+tourView :: forall k p v. PSQ k p v -> TourView k p v
 tourView Void                                = Null
 tourView (Winner e Start _)                  = Single e
 tourView (Winner e (RLoser _ e' tl m tr) m') = Winner e tl m `Play` Winner e' tr m'
 tourView (Winner e (LLoser _ e' tl m tr) m') = Winner e' tl m `Play` Winner e tr m'
 
-play :: forall k p v. Ord k => Ord p => OrdPSQ k p v -> OrdPSQ k p v -> OrdPSQ k p v
+-- | Take two pennants and returns a new pennant that is the union of
+-- | the two with the precondition that the keys in the ﬁrst tree are
+-- | strictly smaller than the keys in the second tree.
+play :: forall k p v. Ord k => Ord p => PSQ k p v -> PSQ k p v -> PSQ k p v
 play Void t' = t'
 play t Void  = t
 play (Winner e@(Elem k p v) t m) (Winner e'@(Elem k' p' v') t' m')
   | Tuple p k `beats` Tuple p' k' = Winner e (unsafePartial $ rbalance k' p' v' t m t') m'
   | otherwise                     = Winner e' (unsafePartial $ lbalance k p v t m t') m'
+
+unsafePlay :: forall k p v. Ord k => Ord p => PSQ k p v -> PSQ k p v -> PSQ k p v
+unsafePlay Void t' = t'
+unsafePlay t Void  = t
+unsafePlay (Winner e@(Elem k p v) t m) (Winner e'@(Elem k' p' v') t' m')
+  | Tuple p k `beats` Tuple p' k' = Winner e (rloser k' p' v' t m t') m'
+  | otherwise                     = Winner e' (lloser k p v t m t') m'
 
 beats :: forall p k. Ord p => Ord k => Tuple p k -> Tuple p k -> Boolean
 beats (p /\ k) (p' /\ k') = p < p' || (p == p' && k < k')
@@ -304,7 +477,7 @@ right :: forall k p v. Partial => LTree k p v -> LTree k p v
 right (LLoser _ _ _  _ tr) = tr
 right (RLoser _ _ _  _ tr) = tr
 
-maxKey :: forall k p v. Partial => OrdPSQ k p v -> k
+maxKey :: forall k p v. Partial => PSQ k p v -> k
 maxKey (Winner _ _ m) = m
 
 lloser :: forall k p v. k -> p -> v -> LTree k p v -> k -> LTree k p v -> LTree k p v

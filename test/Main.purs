@@ -7,9 +7,9 @@ import Control.Monad.Eff.Console (log, CONSOLE)
 import Control.Monad.Eff.Exception (EXCEPTION)
 import Control.Monad.Eff.Random (RANDOM)
 
-import Test.Data.OrdPSQ (ordPSQTest)
+import Test.Data.PSQ (psqTest)
 
 main :: Eff (console :: CONSOLE, random :: RANDOM, exception :: EXCEPTION) Unit
 main = do
   log "Running OrdPSQ tests"
-  ordPSQTest
+  psqTest
