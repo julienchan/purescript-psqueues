@@ -1,5 +1,5 @@
 {
-  "name": "purescript-queues",
+  "name": "purescript-psqueues",
   "ignore": [
     "**/.*",
     "node_modules",
