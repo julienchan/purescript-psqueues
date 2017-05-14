@@ -186,25 +186,25 @@ atMost
   => p -> PSQ k p v -> Tuple (List (ElemRec k p v)) (PSQ k p v)
 atMost pt q =
   let sequ /\ q' = atMosts pt q
-  in dlToList sequ /\ q'
+  in seqToList sequ /\ q'
 
 atMosts
   :: forall k p v
    . Ord k => Ord p
-  => p -> PSQ k p v -> Tuple (DLTree (ElemRec k p v)) (PSQ k p v)
+  => p -> PSQ k p v -> Tuple (Sequ (ElemRec k p v)) (PSQ k p v)
 atMosts pt q = case q of
   Winner (Elem _ p _) _ _
-    | p > pt        -> emptyDL /\ q
-  Void              -> emptyDL /\ Void
-  Winner (Elem k p v) Start _  -> singleDL { key: k, prio: p, value: v } /\ Void
+    | p > pt        -> emptySequ /\ q
+  Void              -> emptySequ /\ Void
+  Winner (Elem k p v) Start _  -> singleSequ { key: k, prio: p, value: v } /\ Void
   Winner e (RLoser _ e' tl m tr) m' ->
     let sequ /\ q'   = atMosts pt (Winner e tl m)
         sequ' /\ q'' = atMosts pt (Winner e' tr m')
-    in sequ `appendDL` sequ' /\ q' `play` q''
+    in (sequ <+> sequ') /\ q' `play` q''
   Winner e (LLoser _ e' tl m tr) m' ->
     let sequ /\ q'   = atMosts pt (Winner e' tl m)
         sequ' /\ q'' = atMosts pt (Winner e tr m')
-    in sequ `appendDL` sequ' /\ q' `play` q''
+    in (sequ <+> sequ') /\ q' `play` q''
 
 -- | Construct an empty queue
 empty :: forall k p v. PSQ k p v
@@ -355,13 +355,13 @@ keys = map _.key <<< toAscList
 -- |
 -- | Running time: `O(n)`
 toAscList :: forall k p v. PSQ k p v -> List (ElemRec k p v)
-toAscList q = dlToList $ go q
+toAscList q = seqToList $ go q
   where
-  go :: PSQ k p v -> DLTree (ElemRec k p v)
+  go :: PSQ k p v -> Sequ (ElemRec k p v)
   go t = case tourView t of
-    Null                -> emptyDL
-    Single (Elem k p v) -> singleDL { key: k, prio: p, value: v }
-    Play tl tr          -> go tl `appendDL` go tr
+    Null                -> emptySequ
+    Single (Elem k p v) -> singleSequ { key: k, prio: p, value: v }
+    Play tl tr          -> go tl <+> go tr
 
 -- | Insert a new key, priority and value into the queue. If the key is already
 -- | present in the queue, then the evicted priority and value can be found the
@@ -626,23 +626,19 @@ rdoubleRight k1 p1 v1 (LLoser _ (Elem k2 p2 v2) t1 m1 t2) m2 t3 =
 rdoubleRight k1 p1 v1 (RLoser _ (Elem k2 p2 v2) t1 m1 t2) m2 t3 =
   rsingleRight k1 p1 v1 (rsingleLeft k2 p2 v2 t1 m1 t2) m2 t3
 
--- | Defunctional Hughes List or DList to normal data type
-data DLTree a = DNil | DLeaf a | DBranch (DLTree a) (DLTree a)
+-- | Hughes's efficient sequence type
+newtype Sequ a = Sequ (List a -> List a)
 
-emptyDL :: forall a. DLTree a
-emptyDL = DNil
+emptySequ :: forall a. Sequ a
+emptySequ = Sequ (\as -> as)
 
-singleDL :: forall a. a -> DLTree a
-singleDL = DLeaf
+singleSequ :: forall a. a -> Sequ a
+singleSequ a = Sequ (\as -> a : as)
 
-appendDL :: forall a. DLTree a -> DLTree a -> DLTree a
-appendDL = DBranch
+appendSequ :: forall a. Sequ a -> Sequ a -> Sequ a
+appendSequ (Sequ x1) (Sequ x2) = Sequ (\as -> x1 (x2 as))
 
-dlToList :: forall a. DLTree a -> List a
-dlToList dl = go dl Nil
-  where
-  go DNil xs = xs
-  go (DLeaf a) xs = a:xs
-  go (DBranch DNil r) xs = go r xs
-  go (DBranch (DLeaf x) r) xs = x : go r xs
-  go (DBranch (DBranch l1 l2) r) xs = go (DBranch l1 (DBranch l2 r)) xs
+infixr 5 appendSequ as <+>
+
+seqToList :: forall a. Sequ a -> List a
+seqToList (Sequ x) = x Nil
