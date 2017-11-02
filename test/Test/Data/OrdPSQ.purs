@@ -1,95 +1,19 @@
 module Test.Data.OrdPSQ
-  ( psqTest
+  ( ordPsqTest
   ) where
 
 import Prelude
 
-import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Console (log, CONSOLE)
-import Control.Monad.Eff.Exception (EXCEPTION)
-import Control.Monad.Eff.Random (RANDOM)
-
-import Data.Array as A
-import Data.Foldable (foldr)
-import Data.List (List(Nil), (:), uncons, reverse, length)
+import Data.List (List(Nil), reverse, length)
 import Data.Tuple (Tuple(..))
-import Data.Maybe (Maybe(..), isNothing)
-import Data.NonEmpty ((:|))
-import Data.Unfoldable (replicateA)
+import Data.Maybe (Maybe(..))
 
-import Test.QuickCheck ((<?>), quickCheck, class Testable, Result(Success), test)
-import Test.QuickCheck.Gen (Gen, frequency, chooseInt, elements)
-import Test.QuickCheck.Arbitrary (class Arbitrary, arbitrary)
+import Test.Unit.Assert (shouldEqual)
+import Test.Unit (describe, it)
+import Test.Unit.QuickCheck (quickCheck)
 
+import Test.Data.PSQ.Utils (TestOrdPSQ(..), SmallKey, PSQTestSuite, (==>))
 import Data.OrdPSQ.Internal as OrdPSQ
-
-data Action k v
-    = Insert k Int v
-    | DeleteRandomMember
-    | DeleteMin
-
-derive instance eqAction :: (Eq k, Eq v) => Eq (Action k v)
-
-instance showAction :: (Show k, Show v) => Show (Action k v) where
-    show (Insert k p v) = "(Insert " <> show k <> " " <> show p <> " " <> show v <> " )"
-    show DeleteRandomMember = "DeleteRandomMember"
-    show DeleteMin = "DeleteMin"
-
-arbitraryPriority :: Gen Int
-arbitraryPriority = chooseInt (-10) 10
-
-applyAction :: forall k v. Ord k => Action k v -> OrdPSQ.OrdPSQ k Int v -> Gen (OrdPSQ.OrdPSQ k Int v)
-applyAction (Insert k p v) psq      = pure $ OrdPSQ.insert k p v psq
-applyAction DeleteRandomMember psq  = do
-    let keys = OrdPSQ.keys psq
-    case uncons keys of
-        Nothing             -> pure psq
-        Just { head, tail } -> do
-            key <- elements (head :| A.fromFoldable tail)
-            pure $ OrdPSQ.delete key psq
-applyAction DeleteMin psq = pure $ case OrdPSQ.minView psq of
-    Nothing        -> psq
-    Just { queue } -> queue
-
-instance arbitraryAction :: (Arbitrary p, Arbitrary v) => Arbitrary (Action p v) where
-    arbitrary = frequency $
-        Tuple 10.0 (Insert <$> arbitrary <*> arbitraryPriority <*> arbitrary)
-        :|
-        ( Tuple 2.0 (pure DeleteRandomMember)
-        : Tuple 2.0 (pure DeleteMin)
-        : Nil)
-
-newtype TestOrdPSQ k v = TestOrdPSQ (OrdPSQ.OrdPSQ k Int v)
-
-instance arbTestOrdPSQ :: (Arbitrary k, Arbitrary v, Ord k) => Arbitrary (TestOrdPSQ k v) where
-    arbitrary = do
-        numActions <- chooseInt 0 100
-        actions <- replicateA numActions (arbitrary :: Gen (Action k v))
-        TestOrdPSQ <$> foldLM (\t a -> applyAction a t) OrdPSQ.empty actions
-      where
-        foldLM :: forall a b m. Monad m => (b -> a -> m b) -> b -> List a -> m b
-        foldLM f z0 xs = foldr f' pure xs z0
-          where
-            f' x k z = f z x >>= k
-
-data SmallKey = A | B | C | D | E | F | G | H | I | J
-derive instance eqSmallKey :: Eq SmallKey
-derive instance ordSmallKey :: Ord SmallKey
-
-instance showSmallKey :: Show SmallKey where
-    show A = "A"
-    show B = "B"
-    show C = "C"
-    show D = "D"
-    show E = "E"
-    show F = "F"
-    show G = "G"
-    show H = "H"
-    show I = "I"
-    show J = "J"
-
-instance arbSmallKey :: Arbitrary SmallKey where
-    arbitrary = elements $ A :| [B, C, D, E, F, G, H, I, J]
 
 smallKey :: SmallKey -> SmallKey
 smallKey k = k
@@ -148,10 +72,6 @@ propertyAlter t k =
     f Nothing   = Tuple unit $ Just (Tuple 100 'a')
     f (Just _)  = Tuple unit Nothing
 
-propertyIf :: forall a. Testable a => Boolean -> a -> Gen Result
-propertyIf false _ = pure Success
-propertyIf true p  = test p
-
 elemEq :: forall k p v. Eq k => Eq p => Eq v => OrdPSQ.ElemRec k p v -> OrdPSQ.ElemRec k p v -> Boolean
 elemEq x y = x.key == y.key && x.prio == y.prio && x.value == y.value
 
@@ -162,76 +82,75 @@ showElem rec =
     <> ", value: " <> show rec.value
     <> " }"
 
-infix 2 propertyIf as ==>
+ordPsqTest :: forall eff. PSQTestSuite eff
+ordPsqTest =
+    describe "Basic functionality" do
+        it "size" do
+            OrdPSQ.null (OrdPSQ.empty :: OrdPSQ.OrdPSQ Int Char Unit) `shouldEqual` true
+            OrdPSQ.null (OrdPSQ.singleton 3 100 'a') `shouldEqual` false
 
-psqTest :: forall eff. Eff (console :: CONSOLE, random :: RANDOM, exception :: EXCEPTION | eff) Unit
-psqTest = do
-    log "Test eq instance"
-    quickCheck $ \k p v (TestOrdPSQ t) ->
-        smallKeyToNumberMap t == smallKeyToNumberMap t && OrdPSQ.insert k p v t == OrdPSQ.insert k p v t
-        <?> ("q: " <> show t)
+        it "empty" do
+            (OrdPSQ.keys (OrdPSQ.empty :: OrdPSQ.OrdPSQ Int Char Unit)) `shouldEqual` Nil
 
-    log "Test build OrdPSQ from Foldable"
-    quickCheck \xs ->
-        propertyFromFoldable xs
-        <?> ("foldable: " <> show xs)
+        describe "Property Check" do
+            describe "property eq instance" do
+                it "Basic operation" do
+                    quickCheck $ \k p v (TestOrdPSQ t) ->
+                        smallKeyToNumberMap t == smallKeyToNumberMap t
+                        && OrdPSQ.insert k p v t == OrdPSQ.insert k p v t
 
-    log "Test size of OrdPSQ"
-    quickCheck $ \(TestOrdPSQ t) ->
-        OrdPSQ.size (t :: OrdPSQ.OrdPSQ Int Int Char) == length (OrdPSQ.toAscList t)
-        <?> ("q: " <> show t)
+                it "Reflexity" do
+                    quickCheck \(TestOrdPSQ t) ->
+                        ((t :: OrdPSQ.OrdPSQ SmallKey Int Char) == t) == true
 
-    log "Test property deleteMin"
-    quickCheck \(TestOrdPSQ t) ->
-        propertyDeleteMin t
-        <?> ("q: " <> show t)
+                it "symmetry" do
+                    quickCheck \(TestOrdPSQ t1) (TestOrdPSQ t2) ->
+                        ((t1 :: OrdPSQ.OrdPSQ SmallKey Int Char) == t2) == (t2 == t1)
 
-    log "Test singleton"
-    quickCheck $ \k p v ->
-        OrdPSQ.insert k p v OrdPSQ.empty == OrdPSQ.singleton (smallKey k) (number p) (charId v)
+                it "transitivity" do
+                    quickCheck \k p v ->
+                        let t1 = OrdPSQ.singleton k p v :: OrdPSQ.OrdPSQ SmallKey Int Char
+                            t2 = OrdPSQ.singleton k p v
+                            t3 = OrdPSQ.singleton k p v
+                        in t1 == t2 && t2 == t3 && t1 == t3
 
-    log "Test insert size queue"
-    quickCheck $ \k p v (TestOrdPSQ t) ->
-        propertyInsertSize k p v t
-        <?> ("k: " <> show k <> ", p: " <> show p <> ", v: " <> show v <> ", q: " <> show t)
+            it "build OrdPSQ from Foldable" do
+                quickCheck propertyFromFoldable
 
-    log "Test inserting into empty queue"
-    quickCheck $ \k p v ->
-        OrdPSQ.lookup (smallKey k) (OrdPSQ.insert k p v OrdPSQ.empty) == Just (Tuple (number p) (charId v))
-        <?> ("k: " <> show k <> ", p: " <> show p <> ", v: " <> show v)
+            it "Size return correct" do
+                quickCheck $ \(TestOrdPSQ t) ->
+                    OrdPSQ.size (t :: OrdPSQ.OrdPSQ Int Int Char) == length (OrdPSQ.toAscList t)
 
-    log "Test member lookup"
-    quickCheck $ \k (TestOrdPSQ t) ->
-        propMemberLookup k t
-        <?> ("k: " <> show k <> ", queue: " <> show t)
+            it "Property deleteMin" do
+                quickCheck \(TestOrdPSQ t) -> propertyDeleteMin t
 
-    log "Test lookup delete"
-    quickCheck $ \k p v (TestOrdPSQ t) ->
-        (OrdPSQ.lookup (smallKey k) t == Nothing) ==>
-        (OrdPSQ.delete k (OrdPSQ.insert k p (charId v) t) == t)
+            it "Test singleton" do
+                quickCheck $ \k p v ->
+                    OrdPSQ.insert k p v OrdPSQ.empty == OrdPSQ.singleton (smallKey k) (number p) (charId v)
 
-    log "Test delete non member"
-    quickCheck $ \k (TestOrdPSQ t) ->
-        (OrdPSQ.lookup (smallKey k) t == Nothing) ==>
-        (OrdPSQ.delete k t == (t :: OrdPSQ.OrdPSQ SmallKey Int Char))
+            it "Test insert size queue" do
+                quickCheck $ \k p v (TestOrdPSQ t) ->
+                    propertyInsertSize k p v t
 
-    log "Test Insert deleteView"
-    quickCheck $ \k p v (TestOrdPSQ t) ->
-        propertyInsertDeleteView t k p v
-        <?> ("k: " <> show k <> ", p: " <> show p <> ", v: " <> show v <> ", q: " <> show t)
+            it "Test inserting into empty queue" do
+                quickCheck $ \k p v ->
+                    OrdPSQ.lookup (smallKey k) (OrdPSQ.insert k p v OrdPSQ.empty) == Just (Tuple (number p) (charId v))
 
-    log "Test property alter"
-    quickCheck $ \k (TestOrdPSQ t) ->
-        propertyAlter t k
-        <?> ("k: " <> show k <> ", q: " <> show t)
+            it "Test member lookup" do
+                quickCheck $ \k (TestOrdPSQ t) -> propMemberLookup k t
 
-    log "Test empty"
-    do
-        let psqEmpty = OrdPSQ.empty :: OrdPSQ.OrdPSQ Int Int Char
-        quickCheck (OrdPSQ.size psqEmpty == 0 <?> "invalid size - size should 0 for empty queue")
+            it "Test lookup delete" do
+                quickCheck $ \k p v (TestOrdPSQ t) ->
+                    (OrdPSQ.lookup (smallKey k) t == Nothing) ==>
+                    (OrdPSQ.delete k (OrdPSQ.insert k p (charId v) t) == t)
 
-    log "Test findMin"
-    do
-        let rpsq' = OrdPSQ.fromFoldable [OrdPSQ.elemRec 5 101 'a', OrdPSQ.elemRec 3 100 'b']
-        quickCheck (isNothing (OrdPSQ.findMin (OrdPSQ.empty :: OrdPSQ.OrdPSQ Int Int Char)) <?> "Invalid findMin - empty case")
-        quickCheck ((elemEq (OrdPSQ.elemRec 3 100 'b') <$> OrdPSQ.findMin rpsq') == Just true <?> "Invalid findMin - 3 100 b")
+            it "Test delete non member" do
+                quickCheck $ \k (TestOrdPSQ t) ->
+                    (OrdPSQ.lookup (smallKey k) t == Nothing) ==>
+                    (OrdPSQ.delete k t == (t :: OrdPSQ.OrdPSQ SmallKey Int Char))
+
+            it "Test Insert deleteView" do
+                quickCheck $ \k p v (TestOrdPSQ t) -> propertyInsertDeleteView t k p v
+
+            it "Test property alter" do
+                quickCheck $ \k (TestOrdPSQ t) -> propertyAlter t k

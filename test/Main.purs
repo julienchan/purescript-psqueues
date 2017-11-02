@@ -1,15 +1,19 @@
+
 module Test.Main where
 
 import Prelude
 
-import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Console (log, CONSOLE)
-import Control.Monad.Eff.Exception (EXCEPTION)
-import Control.Monad.Eff.Random (RANDOM)
+import Control.Monad.Aff.AVar (AVAR)
 
-import Test.Data.OrdPSQ (psqTest)
+import Test.QuickCheck (QC)
+import Test.Unit (suite)
+import Test.Unit.Console (TESTOUTPUT)
+import Test.Unit.Main (runTest)
 
-main :: Eff (console :: CONSOLE, random :: RANDOM, exception :: EXCEPTION) Unit
-main = do
-    log "Running OrdPSQ tests"
-    psqTest
+import Test.Data.OrdPSQ (ordPsqTest)
+import Test.Data.IntPSQ (intPsqTest)
+
+main :: forall eff. QC (testOutput :: TESTOUTPUT, avar :: AVAR | eff) Unit
+main = runTest $ suite "PSQueus" do
+    ordPsqTest
+    intPsqTest

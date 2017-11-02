@@ -7,9 +7,10 @@
     "output"
   ],
   "dependencies": {
-    "purescript-lists": "^4.0.0"
+    "purescript-lists": "^4.1.1"
   },
   "devDependencies": {
-    "purescript-quickcheck": "^4.4.0"
+    "purescript-test-unit": "^13.0.0",
+    "purescript-quickcheck": "^4.6.0"
   }
 }

@@ -1,4 +1,43 @@
-module Data.IntPSQ.Internal where
+module Data.IntPSQ.Internal
+    ( Key
+    , IntPSQ(..)
+    , Mask(..)
+    , ElemRec
+
+    -- query
+    , null
+    , size
+    , member
+    , lookup
+    , findMin
+
+    -- construction
+    , empty
+    , singleton
+    , elemRec
+
+    -- insertion
+    , insert
+
+    -- Delete/update
+    , delete
+    , deleteMin
+    , alter
+    , alterMin
+
+    , fromFoldable
+    , toList
+    , keys
+
+    -- Views
+    , insertView
+    , deleteView
+    , minView
+
+    , mapWithKeyPrio
+
+    , unsafeInsertNew
+    ) where
 
 import Prelude
 
@@ -8,17 +47,34 @@ import Data.List as L
 import Data.Maybe (Maybe(..), isJust, maybe)
 import Data.Tuple (Tuple(..))
 
-import Math (pow)
-
 
 type Key = Int
 
 -- | A priority search queue with ```Int``` keys and priorities of type ```p``` and
--- | values of type ```v```. It is strict in keys, priorities and values.
+-- | values of type ```v```.
 data IntPSQ p v
     = Bin Key p v Mask (IntPSQ p v) (IntPSQ p v)
     | Tip Key p v
     | Nil
+
+instance functorIntPSQ :: Functor (IntPSQ p) where
+    map f = go
+      where
+        go = case _ of
+            Nil               -> Nil
+            Tip k p v         -> Tip k p (f v)
+            Bin k p v m l r   -> Bin k p (f v) m (go l) (go r)
+
+instance eqIntPSQ :: (Ord p, Eq v) => Eq (IntPSQ p v) where
+    eq = go
+      where
+        go x y = case minView x, minView y of
+            Nothing, Nothing -> true
+            Just rx, Just ry ->
+                let kon = rx.key == ry.key && rx.prio == ry.prio && rx.value == ry.value
+                in if kon then go rx.queue ry.queue else false
+            Just _, Nothing  -> false
+            Nothing, Just _  -> false
 
 type ElemRec p v =
     { key   :: Int
@@ -27,6 +83,11 @@ type ElemRec p v =
     }
 
 infixr 6 Tuple as /\
+
+-- | Create an element record, useful when building PSQ from `Foldable`
+-- |
+elemRec :: forall p v. Int -> p -> v -> ElemRec p v
+elemRec = { key: _, prio: _, value: _ }
 
 ------------------------------------------------------------------------------
 -- Query
@@ -170,6 +231,27 @@ alter f k t0 =
     in case f mbX of
         b /\ mbX' -> b /\ maybe t (\(Tuple p v) -> unsafeInsertNew k p v t) mbX'
 
+alterMin
+    :: forall b p v. Ord p
+    => (Maybe (ElemRec p v) -> Tuple b (Maybe (ElemRec p v)))
+    -> IntPSQ p v
+    -> Tuple b (IntPSQ p v)
+alterMin f = case _ of
+    Nil -> case f Nothing of
+        b /\ Nothing  -> b /\ Nil
+        b /\ Just rec -> b /\ Tip rec.key rec.prio rec.value
+
+    Tip k p x -> case f (Just { key: k, prio: p, value: x }) of
+        b /\ Nothing  -> b /\ Nil
+        b /\ Just rec -> b /\ Tip rec.key rec.prio rec.value
+
+    Bin k p x m l r -> case f (Just { key: k, prio: p, value: x }) of
+        b /\ Nothing           -> b /\ merge m l r
+        b /\ Just rec
+           | k  /= rec.key   -> b /\ insert rec.key rec.prio rec.value (merge m l r)
+           | rec.prio <= p   -> b /\ Bin k rec.prio rec.value m l r
+           | otherwise       -> b /\ unsafeInsertNew k rec.prio rec.value (merge m l r)
+
 -- | Smart constructor for a 'Bin' node whose left subtree could have become
 -- | 'Nil'.
 binShrinkL :: forall p v. Key -> p -> v -> Mask -> IntPSQ p v -> IntPSQ p v -> IntPSQ p v
@@ -193,7 +275,7 @@ binShrinkR k p x m l r   = Bin k p x m l r
 -- | Build a priority search queue from a `Foldable` of { key, value, prio } records.
 -- | If the Foldable contains more than one priority and value for the same key, the
 -- | last priority and value for the key is retained.
-fromFoldable :: forall f p v. Ord p v => Foldable f => f (ElemRec k p v) -> IntPSQ p v
+fromFoldable :: forall f p v. Ord p => Foldable f => f (ElemRec p v) -> IntPSQ p v
 fromFoldable = foldr accum empty
   where
     accum rec q = insert rec.key rec.prio rec.value q
@@ -231,6 +313,9 @@ toList = go L.Nil
     go acc (Tip k' p' x')        = L.Cons ({ key: k', prio: p', value: x'}) acc
     go acc (Bin k' p' x' _m l r) = go (go (L.Cons ({ key: k', prio: p', value: x'}) acc) r) l
 
+keys :: forall p v. IntPSQ p v -> L.List Int
+keys = map _.key <<< toList
+
 --------------------------------------------------------------------------------
 -- Views -----------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -239,7 +324,7 @@ toList = go L.Nil
 -- | present in the queue, then the evicted priority and value can be found the
 -- | first element of the returned tuple.
 insertView
-    :: forall k p v. Ord p
+    :: forall p v. Ord p
     => Int -> p -> v -> IntPSQ p v -> Tuple (Maybe (Tuple p v)) (IntPSQ p v)
 insertView k p x t0 = case deleteView k t0 of
     Nothing  -> Nothing /\ unsafeInsertNew k p x t0
@@ -284,6 +369,17 @@ minView t = case t of
     Bin k p x m l r -> Just { key: k, prio: p, value: x, queue: merge m l r }
 
 --------------------------------------------------------------------------------
+-- Traversals ------------------------------------------------------------------
+--------------------------------------------------------------------------------
+mapWithKeyPrio :: forall p v w. (Int -> p -> v -> w) -> IntPSQ p v -> IntPSQ p w
+mapWithKeyPrio f = go
+  where
+    go = case _ of
+        Nil             -> Nil
+        Tip k p x       -> Tip k p (f k p x)
+        Bin k p x m l r -> Bin k p (f k p x) m (go l) (go r)
+
+--------------------------------------------------------------------------------
 -- Bit Twidling ----------------------------------------------------------------
 --------------------------------------------------------------------------------
 
@@ -314,12 +410,12 @@ _mask :: Int -> Int -> Int
 _mask m k = (k .|. (m-1)) .&. complement m
 
 highestBit :: Int -> Int -> Int
-highestBit x m = highb (x .&. complement (m - 1)) m
+highestBit y m = highb (y .&. complement (m - 1)) m
   where
     highb :: Int -> Int -> Int
-    highb x m
-        | x == m    = m
-        | otherwise = highb (x .&. complement m) (2 * m)
+    highb x n
+        | x == n    = n
+        | otherwise = highb (x .&. complement n) (2 * n)
 
 branchingBit' :: Int -> Mask -> Int -> Mask -> Mask
 branchingBit' k1 (Mask m1) k2 (Mask m2) = Mask (highestBit (k1 .^. k2) (max 1 (2 * max m1 m2)))
